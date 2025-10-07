@@ -1,0 +1,21 @@
+{
+  "name": "demand-sheets-ocr-app",
+  "version": "1.0.0",
+  "description": "Vercel serverless function for processing image demands and updating Google Sheets.",
+  "main": "api/submit.js",
+  "scripts": {
+    "start": "echo 'Run this on Vercel'",
+    "test": "echo 'No tests specified'"
+  },
+  "dependencies": {
+    "@google-cloud/documentai": "^8.0.0",
+    "googleapis": "^129.0.0",
+    "cors": "^2.8.5"
+  },
+  "keywords": [
+    "vercel",
+    "serverless",
+    "documentai",
+    "google-sheets"
+  ]
+}
