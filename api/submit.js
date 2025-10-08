@@ -2,6 +2,18 @@ const { DocumentProcessorServiceClient } = require('@google-cloud/documentai');
 const { google } = require('googleapis');
 const cors = require('cors');
 
+// **NEW CONFIGURATION: Explicitly set Vercel's body parser limit**
+// This is necessary because the Base64 image string can be very large (many MBs)
+// and Node.js often imposes a default limit (like 1MB), causing the data to be truncated.
+module.exports.config = {
+    api: {
+        bodyParser: {
+            sizeLimit: '4mb', // Set the limit to 4MB, adjust higher if images are larger
+        },
+    },
+};
+
+
 // --- CONFIGURATION (Loaded from Vercel Environment Variables) ---
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const PROCESSOR_ID = process.env.DOCAI_PROCESSOR_ID;
@@ -124,9 +136,10 @@ module.exports = async (req, res) => {
 
     // 1. DOCUMENT AI PROCESSING (OCR/Extraction)
     try {
+        // --- MODIFICATION: Convert Base64 string to a Buffer for Document AI ---
         const document = {
-            content: image, // Base64 image data
-            mimeType: mimeType, // <-- USE THE DYNAMICALLY SENT MIME TYPE
+            content: Buffer.from(image, 'base64'), // <-- Use Buffer.from for robust binary data handling
+            mimeType: mimeType,
         };
 
         const [result] = await docaiClient.processDocument({
