@@ -107,9 +107,14 @@
             showMessage("Uploading photo and analyzing demand data...", false);
             
             // 1. Convert file to Base64
+            const mimeType = demandPhoto.type; // <-- GET THE ACTUAL MIME TYPE
+            
             const base64Image = await new Promise((resolve, reject) => {
                 const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                reader.onloadend = () => {
+                    // Extract only the Base64 data part (remove "data:image/jpeg;base64,")
+                    resolve(reader.result.split(',')[1]);
+                };
                 reader.onerror = reject;
                 reader.readAsDataURL(demandPhoto);
             });
@@ -118,7 +123,8 @@
                 storeId: storeId,
                 date: submissionDate,
                 image: base64Image, // Base64 encoded image data
-                filename: demandPhoto.name // Not strictly needed, but good for logs
+                mimeType: mimeType, // <-- SEND THE MIME TYPE
+                filename: demandPhoto.name 
             };
 
             // Vercel API Route Endpoint
