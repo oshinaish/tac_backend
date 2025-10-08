@@ -113,10 +113,11 @@ module.exports = async (req, res) => {
         return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    const { storeId, date, image, filename } = req.body;
+    // Capture the new mimeType field
+    const { storeId, date, image, mimeType, filename } = req.body;
 
-    if (!storeId || !date || !image) {
-        return res.status(400).json({ error: 'Missing storeId, date, or image data in request body.' });
+    if (!storeId || !date || !image || !mimeType) { // Check for mimeType
+        return res.status(400).json({ error: 'Missing storeId, date, image data, or mimeType in request body.' });
     }
 
     const processorPath = docaiClient.processorPath(GOOGLE_PROJECT_ID, LOCATION, PROCESSOR_ID);
@@ -125,7 +126,7 @@ module.exports = async (req, res) => {
     try {
         const document = {
             content: image, // Base64 image data
-            mimeType: 'image/jpeg', 
+            mimeType: mimeType, // <-- USE THE DYNAMICALLY SENT MIME TYPE
         };
 
         const [result] = await docaiClient.processDocument({
@@ -136,7 +137,7 @@ module.exports = async (req, res) => {
         const newDemandRows = extractDemandData(result.document, storeId, date);
 
         if (newDemandRows.length === 0) {
-            return res.status(200).json({ status: "warning", message: "Successfully processed image, but no recognizable quantities were found.", rows_added: 0 });
+            return res.status(200).json({ status: "warning", message: "Successfully processed image, but no recognizable quantities were found. Check if the handwriting is clear.", rows_added: 0 });
         }
 
         // 2. GOOGLE SHEETS UPDATE
@@ -156,10 +157,11 @@ module.exports = async (req, res) => {
         });
 
     } catch (error) {
+        // Logging the full error details can help debug the exact argument issue
         console.error('Full Submission Error:', error);
         return res.status(500).json({ 
             status: "error", 
-            message: 'A critical error occurred during OCR or Sheets update.',
+            message: 'A critical error occurred during OCR or Sheets update. Check image format or Document AI configuration.',
             details: error.message 
         });
     }
