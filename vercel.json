@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/demand_uploader.html"
+    },
+    {
+      "source": "/api/submit",
+      "destination": "/api/submit"
+    }
+  ]
+}
