@@ -2,7 +2,7 @@ const { DocumentProcessorServiceClient } = require('@google-cloud/documentai');
 const { google } = require('googleapis');
 const cors = require('cors');
 
-// --- CONFIGURATION (Loaded from Vercel Environment Variables) ---
+// --- CONFIGURATION (Loaded from Vercel Environment Variable) ---
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const PROCESSOR_ID = process.env.DOCAI_PROCESSOR_ID;
 const GOOGLE_PROJECT_ID = process.env.GCP_PROJECT_ID;
