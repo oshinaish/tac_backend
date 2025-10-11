@@ -133,6 +133,12 @@ module.exports = async (req, res) => {
     }
 
     const processorPath = docaiClient.processorPath(GOOGLE_PROJECT_ID, LOCATION, PROCESSOR_ID);
+    
+    // --- DEBUGGING ADDITION ---
+    console.log(`[DEBUG] Processor Path: ${processorPath}`);
+    console.log(`[DEBUG] Image MIME Type: ${mimeType}`);
+    console.log(`[DEBUG] Base64 Image Length: ${image ? image.length : 0} characters`);
+    // --- END DEBUGGING ADDITION ---
 
     // 1. DOCUMENT AI PROCESSING (OCR/Extraction)
     try {
