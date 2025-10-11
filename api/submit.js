@@ -88,8 +88,18 @@ export default async function handler(req, res) {
 
   // Check for required input data
   const { documentName, base64File } = req.body;
+  
   if (!documentName || !base64File) {
-    return res.status(400).json({ error: 'Missing documentName or base64File in request body.' });
+    console.error('Missing required fields in request body.');
+    // --- ADDED DEBUGGING LOGS ---
+    console.log('Received Body:', req.body); 
+    console.log('Request Headers:', req.headers); 
+    // ----------------------------
+    return res.status(400).json({ 
+      error: 'Missing documentName or base64File in request body.',
+      // Returning the received body to the client for immediate debugging
+      receivedBody: req.body
+    });
   }
 
   let gcsUri = '';
