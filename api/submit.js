@@ -152,7 +152,8 @@ export default async function handler(req, res) {
 
     // 3. APPEND DATA TO GOOGLE SHEET
     const sheets = await getSheetsClient();
-    const sheetRange = 'Sheet1!A:D'; // Define the range to append data
+    // FIX: Updated range to 'Sheet1!A:E' to accommodate the 5 columns of data being appended.
+    const sheetRange = 'Sheet1!A:E'; // Define the range to append data (A=Time, B=Name, C=URL, D=Text, E=Extracted Data)
 
     // Prepare data row
     const now = new Date().toISOString();
