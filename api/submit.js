@@ -1,219 +1,204 @@
-const { DocumentProcessorServiceClient } = require('@google-cloud/documentai');
-const { Storage } = require('@google-cloud/storage'); // <-- NEW IMPORT
-const { google } = require('googleapis');
-const cors = require('cors');
+import { DocumentProcessorServiceClient } from '@google-cloud/documentai';
+import { Storage } from '@google-cloud/storage';
+import { google } from 'googleapis';
+import Cors from 'cors';
 
-// **NEW CONFIGURATION: Explicitly set Vercel's body parser limit**
-module.exports.config = {
-    api: {
-        bodyParser: {
-            sizeLimit: '4mb',
-        },
-    },
-};
+// --- INITIALIZATION ---
+// Initialize CORS middleware
+const cors = Cors({
+  methods: ['POST', 'OPTIONS'],
+  origin: '*', // Allow all origins for testing. Restrict this in production.
+});
 
-
-// --- CONFIGURATION (Loaded from Vercel Environment Variables) ---
+// Environment variables (Vercel/GCP)
+const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
+const DOCAI_PROCESSOR_ID = process.env.DOCAI_PROCESSOR_ID;
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const PROCESSOR_ID = process.env.DOCAI_PROCESSOR_ID;
-const GOOGLE_PROJECT_ID = process.env.GCP_PROJECT_ID;
-const LOCATION = process.env.DOCAI_LOCATION || 'us';
-const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME; // <-- NEW VARIABLE
+const SERVICE_ACCOUNT_KEY_JSON = process.env.SERVICE_ACCOUNT_KEY_JSON;
 
-// Credentials for Google APIs (Service Account JSON)
-const SERVICE_ACCOUNT_KEY = JSON.parse(process.env.SERVICE_ACCOUNT_KEY_JSON);
-
-// Sheets API Range
-const SHEET_RANGE = 'DemandLog!A:D'; 
-
-// Initialize Document AI Client
-const docaiClient = new DocumentProcessorServiceClient({
-    credentials: SERVICE_ACCOUNT_KEY
-});
-
-// Initialize Google Cloud Storage Client
-const storage = new Storage({ // <-- NEW CLIENT INITIALIZATION
-    credentials: SERVICE_ACCOUNT_KEY
-});
-const bucket = storage.bucket(GCS_BUCKET_NAME);
-
-// Initialize Google Sheets API Client
-const auth = new google.auth.GoogleAuth({
-    credentials: SERVICE_ACCOUNT_KEY,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-});
-const sheets = google.sheets({ version: 'v4', auth });
-
-// Mapping of all your fixed item names (used for filtering OCR results)
-const FIXED_ITEM_LIST = [
-    // Consolidated List from your demand sheets
-    "Sambhar", "Red Chutney", "Dosa Batter", "Idli Batter", "Vada Batter", "Rawa mix", "Onion masala",
-    "Upma Sooji", "Garlic Paste", "Podi Masala", "Sugar", "Poha", "Besan", "Sarson (Mustard seed)",
-    "Kali Mirch", "Jeera", "Kaju", "Pineapple Halwa", "Kacha Peanut Chilke wala", "Dhania Whole", 
-    "Rice", "Atta", "Fortune Refined", "Desi Ghee", "Roasted Chana", "Staff Dal", "Whole red chilli", 
-    "Achar", "Chhole", "Rajma", "Chana Dal", "Sarson Tel", "Meetha Soda", "Roasted Peanuts", 
-    "Soya Badi", "Filter Coffee Pow.", "Chai Patti", "Onions", "Tomatoes", "Green Chillies(Hari Mirch)", 
-    "Coriander leaves(Dhaniya Patta)", "Curry Leaves (Kari Patta)", "Banana Leaves(Kela Patta)", 
-    "Ginger", "Coconut Crush", "Carrot", "Beans", "Potato(aloo)", "Garlic", "Mint(Pudina)", "Lemon", 
-    "Staff Veg.", "Deggi Mirch", "Garam Masala", "Hing Powder", "Dhania Powder", "Kitchen King", 
-    "Chat Masala", "Haldi Powder", "Hari Ilaychi", "Tata Salt", "Black Salt", "50ML Container", 
-    "100ML Container", "250ML Container", "300ML Container", "500ML Container", "Podi Idli Container", 
-    "Silver container", "Vada Lifafa", "Dosa Box Small", "Dosa Box Big", "16*20 Biopolythene", 
-    "13*16 Biopolythene", "Bio Garbagebag Big Size", "Printer Roll", "Bio Spoon", "Wooden Plates", 
-    "Paper Bowl", "Filter Coffee Glass", "Masala Chhachh Glass", "Filter Coffee Packaging", 
-    "Masala Chhachh Packaging", "Tape", "Clean Wrap", "Tissues", "Chef Cap", "Butter Paper", 
-    "Delivery Bag"
-];
-
-
-// Helper to extract text from Document AI text anchor
-function getTextFromSpan(document, textAnchor) {
-    if (!textAnchor || !textAnchor.textSegments) return "";
-    
-    const start = textAnchor.textSegments[0].startIndex || 0;
-    const end = textAnchor.textSegments[textAnchor.textSegments.length - 1].endIndex || 0;
-    
-    return document.text.substring(start, end);
+// Parse the service account key for auth
+let SERVICE_ACCOUNT_KEY;
+try {
+    SERVICE_ACCOUNT_KEY = JSON.parse(SERVICE_ACCOUNT_KEY_JSON);
+} catch (e) {
+    console.error("Failed to parse SERVICE_ACCOUNT_KEY_JSON:", e);
+    // Crash the serverless function if auth fails immediately
+    throw new Error("Invalid SERVICE_ACCOUNT_KEY_JSON provided.");
 }
 
-// Core OCR and data extraction logic
-function extractDemandData(document, storeId, submissionDate) {
-    const extractedRows = [];
+// Initialize Google Cloud clients
+const storage = new Storage({
+    projectId: GCP_PROJECT_ID,
+    credentials: {
+        client_email: SERVICE_ACCOUNT_KEY.client_email,
+        private_key: SERVICE_ACCOUNT_KEY.private_key.replace(/\\n/g, '\n'),
+    },
+});
 
-    if (document.pages && document.pages.length > 0) {
-        // Iterate over all tables found (your template has multiple sections/tables)
-        for (const page of document.pages) {
-            if (page.tables) {
-                for (const table of page.tables) {
-                    for (const row of table.bodyRows) {
-                        // Assuming the structure is: [S. No., Item, Unit, Required Qty]
-                        if (row.cells && row.cells.length >= 4) {
-                            const itemCell = row.cells[1]; // Item Name is index 1
-                            const qtyCell = row.cells[3]; // Required Qty is index 3
+const processorClient = new DocumentProcessorServiceClient({
+    projectId: GCP_PROJECT_ID,
+    credentials: {
+        client_email: SERVICE_ACCOUNT_KEY.client_email,
+        private_key: SERVICE_ACCOUNT_KEY.private_key.replace(/\\n/g, '\n'),
+    },
+});
 
-                            // Extract text
-                            const itemText = getTextFromSpan(document, itemCell.layout.textAnchor);
-                            const qtyText = getTextFromSpan(document, qtyCell.layout.textAnchor);
-                            
-                            const itemName = itemText.trim();
-                            // We are only interested in numbers written by the user
-                            const quantity = qtyText.trim().replace(/\D/g, ''); 
+// --- HELPER FUNCTIONS ---
 
-                            if (FIXED_ITEM_LIST.includes(itemName) && quantity) {
-                                extractedRows.push([
-                                    submissionDate,
-                                    storeId,
-                                    itemName,
-                                    quantity // Keeping it as a string here for Sheets to interpret
-                                ]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return extractedRows;
+// Run the CORS middleware
+function runMiddleware(req, res, fn) {
+  return new Promise((resolve, reject) => {
+    fn(req, res, (result) => {
+      if (result instanceof Error) {
+        return reject(result);
+      }
+      return resolve(result);
+    });
+  });
 }
 
-
-// Vercel Serverless Function handler
-module.exports = async (req, res) => {
-    // Configure CORS for security
-    await new Promise((resolve) => {
-        cors({
-            methods: ['POST'],
-            origin: process.env.FRONTEND_URL || '*', // Restrict this to your Vercel frontend URL in production
-        })(req, res, resolve);
+// Authenticate and get Sheets client
+async function getSheetsClient() {
+    const auth = new google.auth.JWT({
+        email: SERVICE_ACCOUNT_KEY.client_email,
+        key: SERVICE_ACCOUNT_KEY.private_key.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
 
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method Not Allowed' });
-    }
+    await auth.authorize();
+    return google.sheets({ version: 'v4', auth });
+}
 
-    const { storeId, date, image, mimeType, filename } = req.body;
 
-    if (!storeId || !date || !image || !mimeType) {
-        return res.status(400).json({ error: 'Missing required data in request body.' });
-    }
+// --- MAIN HANDLER ---
+export default async function handler(req, res) {
+  // Apply CORS
+  await runMiddleware(req, res, cors);
 
-    const processorPath = docaiClient.processorPath(GOOGLE_PROJECT_ID, LOCATION, PROCESSOR_ID);
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed. Use POST.' });
+  }
+
+  // Check for required input data
+  const { documentName, base64File } = req.body;
+  if (!documentName || !base64File) {
+    return res.status(400).json({ error: 'Missing documentName or base64File in request body.' });
+  }
+
+  let gcsUri = '';
+  let documentText = '';
+
+  try {
+    const dataBuffer = Buffer.from(base64File, 'base64');
+    const timestamp = Date.now();
+    const uniqueId = Math.random().toString(36).substring(2, 8);
+    // Create a path in GCS using a folder structure for organization
+    const gcsFilepath = `uploads/${documentName.replace(/[^a-z0-9]/gi, '_')}-${timestamp}-${uniqueId}.pdf`;
+
+    // 1. UPLOAD FILE TO GCS
+    const file = storage.bucket(GCS_BUCKET_NAME).file(gcsFilepath);
+
+    console.log(`Uploading file to gs://${GCS_BUCKET_NAME}/${gcsFilepath}`);
+
+    // UPLOAD WITHOUT LEGACY ACL OPTIONS
+    await file.save(dataBuffer, {
+        contentType: 'application/pdf', // Assuming PDF based on typical DocAI usage
+        destination: gcsFilepath,
+        // *** CRITICAL FIX: Removed predefinedAcl: 'publicRead' to fix the GCS error. ***
+    });
+
+    // MAKE FILE PUBLIC using the IAM-compliant method
+    await file.makePublic(); // This is the preferred way when using Uniform Bucket-Level Access
     
-    // Convert Base64 string to a Buffer for GCS upload
-    const imageBuffer = Buffer.from(image, 'base64');
-    
-    // Generate a unique filename for GCS
-    const gcsFilename = `demands/${storeId}-${Date.now()}-${filename || 'image.jpg'}`;
-    const file = bucket.file(gcsFilename);
-    const gcsUri = `gs://${GCS_BUCKET_NAME}/${gcsFilename}`;
-
-    try {
-        // 1. UPLOAD IMAGE TO GCS
-        console.log(`[GCS] Uploading file to ${gcsUri}`);
-        await file.save(imageBuffer, {
-            contentType: mimeType,
-            predefinedAcl: 'private', // Keep the file private
-        });
-        console.log(`[GCS] Upload successful.`);
+    gcsUri = `gs://${GCS_BUCKET_NAME}/${gcsFilepath}`;
+    const publicUrl = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/${gcsFilepath}`;
+    console.log(`File uploaded and made public. URI: ${gcsUri}`);
 
 
-        // 2. DOCUMENT AI PROCESSING (OCR/Extraction) using GCS URI
-        console.log(`[DOCAI] Calling processor ${processorPath} with GCS URI.`);
-        
-        // Custom Extractors require the document to be specified as a GCS URI
-        const [result] = await docaiClient.processDocument({
-            name: processorPath,
-            document: {
-                gcsUri: gcsUri, // <-- Using GCS URI now
-                mimeType: mimeType,
-            },
-        });
-        
-        const newDemandRows = extractDemandData(result.document, storeId, date);
+    // 2. PROCESS DOCUMENT WITH DOCUMENT AI
+    const location = GCP_PROJECT_ID === 'your-project-id' ? 'us' : 'us'; // Defaulting to 'us' region
+    const name = `projects/${GCP_PROJECT_ID}/locations/${location}/processors/${DOCAI_PROCESSOR_ID}`;
 
-        // 3. CLEANUP (Delete file from GCS)
-        console.log(`[GCS] Deleting file ${gcsFilename}`);
-        await file.delete();
+    const request = {
+      name,
+      rawDocument: {
+        content: dataBuffer.toString('base64'),
+        mimeType: 'application/pdf',
+      },
+    };
 
+    console.log(`Sending document to Document AI processor: ${DOCAI_PROCESSOR_ID}`);
+    const [result] = await processorClient.processDocument(request);
 
-        if (newDemandRows.length === 0) {
-            return res.status(200).json({ status: "warning", message: "Successfully processed image, but no recognizable quantities were found. Check if the handwriting is clear.", rows_added: 0 });
-        }
+    // Extract text from the processed document
+    documentText = result.document?.text || 'No text extracted.';
 
-        // 4. GOOGLE SHEETS UPDATE
-        const updateResult = await sheets.values.append({
-            spreadsheetId: SPREADSHEET_ID,
-            range: SHEET_RANGE,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: { values: newDemandRows },
-        });
-
-        const rowsAppended = updateResult.data.updates.updatedRows || 0;
-        
-        return res.status(200).json({
-            status: "success",
-            message: `Successfully processed demand. ${rowsAppended} item rows appended to Google Sheet.`,
-            rows_added: rowsAppended
-        });
-
-    } catch (error) {
-        // Log the full error and attempt to clean up the file if the error was not during deletion
-        console.error('Full Submission Error:', error);
-        
-        // Attempt clean up if file exists and error was not in deletion
-        if (file && error.code !== 'NotFound') {
-             try {
-                // Ensure the file exists before trying to delete it (e.g., if error happened before upload)
-                await file.delete(); 
-             } catch (cleanupError) {
-                 console.warn(`[GCS Cleanup] Could not delete file ${gcsFilename}. It may not have been created or deletion failed:`, cleanupError.message);
-             }
-        }
-       
-        return res.status(500).json({ 
-            status: "error", 
-            message: 'A critical error occurred during OCR, GCS upload, or Sheets update.',
-            details: error.message 
+    // Extract key-value pairs (or other structured data) if a form parser is used
+    let extractedData = {};
+    if (result.document?.entities && result.document.entities.length > 0) {
+        result.document.entities.forEach(entity => {
+            extractedData[entity.type] = entity.mentionText || entity.normalizedValue?.text || '';
         });
     }
-};
+
+    console.log(`Document AI processing complete. Extracted Text Length: ${documentText.length}`);
+
+    // 3. APPEND DATA TO GOOGLE SHEET
+    const sheets = await getSheetsClient();
+    const sheetRange = 'Sheet1!A:D'; // Define the range to append data
+
+    // Prepare data row
+    const now = new Date().toISOString();
+    const dataRow = [
+      now,
+      documentName,
+      publicUrl,
+      documentText.substring(0, 500) + (documentText.length > 500 ? '...' : ''), // Truncate text for sheet view
+      JSON.stringify(extractedData) // Add structured data
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: sheetRange,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [dataRow],
+      },
+    });
+
+    console.log('Data successfully appended to Google Sheet.');
+
+    // 4. FINAL SUCCESS RESPONSE
+    return res.status(200).json({
+      message: 'Document processed and data saved successfully.',
+      gcsUrl: publicUrl,
+      documentText: documentText.substring(0, 500) + (documentText.length > 500 ? '...' : ''),
+      extractedData: extractedData,
+    });
+
+  } catch (error) {
+    console.error('SERVERLESS FUNCTION ERROR:', error.message || error);
+    // Delete the file from GCS if upload succeeded but processing failed (optional cleanup)
+    if (gcsUri) {
+        try {
+            await storage.bucket(GCS_BUCKET_NAME).file(gcsUri.substring(`gs://${GCS_BUCKET_NAME}/`.length)).delete();
+            console.log('Cleaned up partially uploaded file from GCS.');
+        } catch (cleanupError) {
+            console.error('Failed to clean up GCS file:', cleanupError.message);
+        }
+    }
+
+    // Return a 500 status with an error message
+    return res.status(500).json({
+      error: 'An internal server error occurred during processing.',
+      details: error.message || 'Unknown error.',
+    });
+  }
+}
