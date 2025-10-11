@@ -1,14 +1,13 @@
 const { DocumentProcessorServiceClient } = require('@google-cloud/documentai');
+const { Storage } = require('@google-cloud/storage'); // <-- NEW IMPORT
 const { google } = require('googleapis');
 const cors = require('cors');
 
 // **NEW CONFIGURATION: Explicitly set Vercel's body parser limit**
-// This is necessary because the Base64 image string can be very large (many MBs)
-// and Node.js often imposes a default limit (like 1MB), causing the data to be truncated.
 module.exports.config = {
     api: {
         bodyParser: {
-            sizeLimit: '4mb', // Set the limit to 4MB, adjust higher if images are larger
+            sizeLimit: '4mb',
         },
     },
 };
@@ -18,7 +17,8 @@ module.exports.config = {
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const PROCESSOR_ID = process.env.DOCAI_PROCESSOR_ID;
 const GOOGLE_PROJECT_ID = process.env.GCP_PROJECT_ID;
-const LOCATION = process.env.DOCAI_LOCATION || 'us'; // e.g., 'us' or 'eu'
+const LOCATION = process.env.DOCAI_LOCATION || 'us';
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME; // <-- NEW VARIABLE
 
 // Credentials for Google APIs (Service Account JSON)
 const SERVICE_ACCOUNT_KEY = JSON.parse(process.env.SERVICE_ACCOUNT_KEY_JSON);
@@ -30,6 +30,12 @@ const SHEET_RANGE = 'DemandLog!A:D';
 const docaiClient = new DocumentProcessorServiceClient({
     credentials: SERVICE_ACCOUNT_KEY
 });
+
+// Initialize Google Cloud Storage Client
+const storage = new Storage({ // <-- NEW CLIENT INITIALIZATION
+    credentials: SERVICE_ACCOUNT_KEY
+});
+const bucket = storage.bucket(GCS_BUCKET_NAME);
 
 // Initialize Google Sheets API Client
 const auth = new google.auth.GoogleAuth({
@@ -125,41 +131,56 @@ module.exports = async (req, res) => {
         return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    // Capture the new mimeType field
     const { storeId, date, image, mimeType, filename } = req.body;
 
-    if (!storeId || !date || !image || !mimeType) { // Check for mimeType
-        return res.status(400).json({ error: 'Missing storeId, date, image data, or mimeType in request body.' });
+    if (!storeId || !date || !image || !mimeType) {
+        return res.status(400).json({ error: 'Missing required data in request body.' });
     }
 
     const processorPath = docaiClient.processorPath(GOOGLE_PROJECT_ID, LOCATION, PROCESSOR_ID);
     
-    // --- DEBUGGING ADDITION ---
-    console.log(`[DEBUG] Processor Path: ${processorPath}`);
-    console.log(`[DEBUG] Image MIME Type: ${mimeType}`);
-    console.log(`[DEBUG] Base64 Image Length: ${image ? image.length : 0} characters`);
-    // --- END DEBUGGING ADDITION ---
+    // Convert Base64 string to a Buffer for GCS upload
+    const imageBuffer = Buffer.from(image, 'base64');
+    
+    // Generate a unique filename for GCS
+    const gcsFilename = `demands/${storeId}-${Date.now()}-${filename || 'image.jpg'}`;
+    const file = bucket.file(gcsFilename);
+    const gcsUri = `gs://${GCS_BUCKET_NAME}/${gcsFilename}`;
 
-    // 1. DOCUMENT AI PROCESSING (OCR/Extraction)
     try {
-        // --- MODIFICATION: Convert Base64 string to a Buffer for Document AI ---
-        const document = {
-            content: Buffer.from(image, 'base64'), // <-- Use Buffer.from for robust binary data handling
-            mimeType: mimeType,
-        };
+        // 1. UPLOAD IMAGE TO GCS
+        console.log(`[GCS] Uploading file to ${gcsUri}`);
+        await file.save(imageBuffer, {
+            contentType: mimeType,
+            predefinedAcl: 'private', // Keep the file private
+        });
+        console.log(`[GCS] Upload successful.`);
 
+
+        // 2. DOCUMENT AI PROCESSING (OCR/Extraction) using GCS URI
+        console.log(`[DOCAI] Calling processor ${processorPath} with GCS URI.`);
+        
+        // Custom Extractors require the document to be specified as a GCS URI
         const [result] = await docaiClient.processDocument({
             name: processorPath,
-            document: document,
+            document: {
+                gcsUri: gcsUri, // <-- Using GCS URI now
+                mimeType: mimeType,
+            },
         });
         
         const newDemandRows = extractDemandData(result.document, storeId, date);
+
+        // 3. CLEANUP (Delete file from GCS)
+        console.log(`[GCS] Deleting file ${gcsFilename}`);
+        await file.delete();
+
 
         if (newDemandRows.length === 0) {
             return res.status(200).json({ status: "warning", message: "Successfully processed image, but no recognizable quantities were found. Check if the handwriting is clear.", rows_added: 0 });
         }
 
-        // 2. GOOGLE SHEETS UPDATE
+        // 4. GOOGLE SHEETS UPDATE
         const updateResult = await sheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
             range: SHEET_RANGE,
@@ -176,11 +197,22 @@ module.exports = async (req, res) => {
         });
 
     } catch (error) {
-        // Logging the full error details can help debug the exact argument issue
+        // Log the full error and attempt to clean up the file if the error was not during deletion
         console.error('Full Submission Error:', error);
+        
+        // Attempt clean up if file exists and error was not in deletion
+        if (file && error.code !== 'NotFound') {
+             try {
+                // Ensure the file exists before trying to delete it (e.g., if error happened before upload)
+                await file.delete(); 
+             } catch (cleanupError) {
+                 console.warn(`[GCS Cleanup] Could not delete file ${gcsFilename}. It may not have been created or deletion failed:`, cleanupError.message);
+             }
+        }
+       
         return res.status(500).json({ 
             status: "error", 
-            message: 'A critical error occurred during OCR or Sheets update. Check image format or Document AI configuration.',
+            message: 'A critical error occurred during OCR, GCS upload, or Sheets update.',
             details: error.message 
         });
     }
